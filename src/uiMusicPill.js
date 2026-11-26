@@ -3,6 +3,7 @@ import Clutter from 'gi://Clutter';
 import GObject from 'gi://GObject';
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
+import Pango from 'gi://Pango';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import { getAverageColor, getClosestGnomeAccent } from './utils.js';
@@ -154,11 +155,75 @@ export const MusicPill = GObject.registerClass(
                 x_align: Clutter.ActorAlign.FILL,
                 style: 'padding-left: 0px; padding-right: 0px; spacing: 0px;'
             });
-            this._textBox.layout_manager.orientation = Clutter.Orientation.VERTICAL;
+            this._textBox.layout_manager.orientation = Clutter.Orientation.HORIZONTAL;
+
+            this._trackInfoBox = new St.BoxLayout({
+                x_expand: true,
+                y_align: Clutter.ActorAlign.CENTER,
+                x_align: Clutter.ActorAlign.FILL,
+                clip_to_allocation: true,
+                style: 'min-width: 0px; padding: 0px; spacing: 0px;'
+            });
+            this._trackInfoBox.layout_manager.orientation = Clutter.Orientation.VERTICAL;
+
+            this._titleRow = new St.BoxLayout({
+                x_expand: true,
+                y_align: Clutter.ActorAlign.CENTER,
+                x_align: Clutter.ActorAlign.FILL,
+                clip_to_allocation: true,
+                style: 'min-width: 0px; padding: 0px; spacing: 0px;'
+            });
+            this._titleRow.layout_manager.orientation = Clutter.Orientation.HORIZONTAL;
+
+            this._classicSingerBadge = new St.Label({
+                y_align: Clutter.ActorAlign.CENTER,
+                x_expand: false,
+                visible: false
+            });
+            this._classicSingerBadge.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+            this._classicSingerBadge.clutter_text.line_wrap = false;
+
             this._titleScroll = new ScrollLabel('music-label-title', this._settings);
+            this._titleRow.add_child(this._classicSingerBadge);
+            this._titleRow.add_child(this._titleScroll);
+
             this._artistScroll = new ScrollLabel('music-label-artist', this._settings);
-            this._textBox.add_child(this._titleScroll);
-            this._textBox.add_child(this._artistScroll);
+            this._trackInfoBox.add_child(this._titleRow);
+            this._trackInfoBox.add_child(this._artistScroll);
+
+            this._lyricPipeLabel = new St.Label({
+                text: '|',
+                y_align: Clutter.ActorAlign.CENTER,
+                x_expand: false,
+                visible: false
+            });
+
+            this._lyricInlineBox = new St.BoxLayout({
+                x_expand: true,
+                y_align: Clutter.ActorAlign.CENTER,
+                x_align: Clutter.ActorAlign.FILL,
+                clip_to_allocation: true,
+                visible: false,
+                style: 'min-width: 0px; padding: 0px; spacing: 0px;'
+            });
+            this._lyricInlineBox.layout_manager.orientation = Clutter.Orientation.HORIZONTAL;
+
+            this._inlineSingerBadge = new St.Label({
+                y_align: Clutter.ActorAlign.CENTER,
+                x_expand: false,
+                visible: false
+            });
+            this._inlineSingerBadge.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+            this._inlineSingerBadge.clutter_text.line_wrap = false;
+
+            this._lyricScroll = new ScrollLabel('music-label-title', this._settings);
+            this._lyricScroll.setForceStartAlign(true);
+            this._lyricInlineBox.add_child(this._inlineSingerBadge);
+            this._lyricInlineBox.add_child(this._lyricScroll);
+
+            this._textBox.add_child(this._trackInfoBox);
+            this._textBox.add_child(this._lyricPipeLabel);
+            this._textBox.add_child(this._lyricInlineBox);
             this._textWrapper.add_child(this._textBox);
 
             this._body.add_child(this._textWrapper);
@@ -321,6 +386,7 @@ export const MusicPill = GObject.registerClass(
                 this._controller._activePill = this;
                 if (this._titleScroll) this._titleScroll.setHoverMode(true);
                 if (this._artistScroll) this._artistScroll.setHoverMode(true);
+                if (this._lyricScroll) this._lyricScroll.setHoverMode(true);
                 let delay = this._settings.get_int('hover-delay');
                 if (this._hoverTimeout) { GLib.Source.remove(this._hoverTimeout); }
                 this._hoverTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
@@ -338,6 +404,7 @@ export const MusicPill = GObject.registerClass(
                 this._isHovered = false;
                 if (this._titleScroll) this._titleScroll.setHoverMode(false);
                 if (this._artistScroll) this._artistScroll.setHoverMode(false);
+                if (this._lyricScroll) this._lyricScroll.setHoverMode(false);
                 if (this._hoverTimeout) {
                     GLib.Source.remove(this._hoverTimeout);
                     this._hoverTimeout = null;
@@ -537,6 +604,15 @@ export const MusicPill = GObject.registerClass(
             this._settings.connectObject('changed::show-album-art', () => this._updateArtVisibility(), this);
             this._settings.connectObject('changed::show-pill-border', () => { this._applyStyle(this._displayedColor.r, this._displayedColor.g, this._displayedColor.b); }, this);
             this._settings.connectObject('changed::show-artist', () => { this._updateDimensions(); this._updateTextDisplay(true); }, this);
+            this._settings.connectObject('changed::pill-lyrics-show-track-info', () => { this._updateTextDisplay(true); this._updateDimensions(); }, this);
+            this._settings.connectObject('changed::pill-stable-karaoke-weight', () => {
+                if (this._lyricObj) {
+                    const obj = this._lyricObj;
+                    this._lyricObj = null;
+                    this.setLyric(obj);
+                }
+            }, this);
+            this._settings.connectObject('changed::enable-singer-attribution', () => { this._updateTextDisplay(true); this._updateDimensions(); }, this);
             this._settings.connectObject('changed::always-show-pill', () => {
                 if (!this._settings.get_boolean('always-show-pill') && this._currentStatus === 'Stopped' && this._isActiveState) {
                     this.updateDisplay(null, null, null, 'Stopped', null, false);
@@ -676,6 +752,13 @@ export const MusicPill = GObject.registerClass(
             this._blurBackdrop = null;
             this._titleScroll = null;
             this._artistScroll = null;
+            this._lyricScroll = null;
+            this._lyricPipeLabel = null;
+            this._lyricInlineBox = null;
+            this._trackInfoBox = null;
+            this._titleRow = null;
+            this._classicSingerBadge = null;
+            this._inlineSingerBadge = null;
             this._visualizer = null;
             this._statusPlayBtn = null;
             this._artWidget = null;
@@ -766,6 +849,10 @@ export const MusicPill = GObject.registerClass(
                 this._artistScroll.setGameMode(!isVisibleAndActive);
                 this._artistScroll.setPlayerPaused(!isPlaying);
             }
+            if (this._lyricScroll) {
+                this._lyricScroll.setGameMode(!isVisibleAndActive);
+                this._lyricScroll.setPlayerPaused(!isPlaying);
+            }
 
             if (this._blurController && this._settings.get_boolean('enable-blur-pill')) {
                 let shouldBlur = this.visible && !this._gameModeActive;
@@ -831,6 +918,7 @@ export const MusicPill = GObject.registerClass(
                 // Signal pill scroll labels to finish current cycle then stop
                 if (this._titleScroll) this._titleScroll.setPendingScrollStop(true);
                 if (this._artistScroll) this._artistScroll.setPendingScrollStop(true);
+                if (this._lyricScroll) this._lyricScroll.setPendingScrollStop(true);
 
                 let hidePillVis = this._settings.get_boolean('popup-hide-pill-visualizer') && this._settings.get_boolean('popup-show-visualizer');
                 if (hidePillVis && this._visBin && this._visBin.visible) {
@@ -884,6 +972,10 @@ export const MusicPill = GObject.registerClass(
                 if (this._artistScroll) {
                     this._artistScroll.setPendingScrollStop(false);
                     this._artistScroll.ignoreResizeFor(400);
+                }
+                if (this._lyricScroll) {
+                    this._lyricScroll.setPendingScrollStop(false);
+                    this._lyricScroll.ignoreResizeFor(400);
                 }
 
                 if (hidePillVis && this._visBin && this._visBin.visible) {
@@ -1244,6 +1336,18 @@ export const MusicPill = GObject.registerClass(
 
             this._titleScroll.setLabelStyle(`font-size: ${fontSizeTitle}; font-weight: 800; color: ${customTextStr}; margin: 0px; padding: 0px;`);
             this._artistScroll.setLabelStyle(`font-size: ${fontSizeArtist}; font-weight: 500; color: ${customTextAlpha}; margin: 0px; padding: 0px;`);
+            if (this._lyricScroll) {
+                this._lyricScroll.setLabelStyle(`font-size: ${fontSizeTitle}; font-weight: 800; color: ${customTextStr}; margin: 0px; padding: 0px;`);
+            }
+            if (this._lyricPipeLabel) {
+                this._lyricPipeLabel.set_style(`font-size: ${fontSizeTitle}; font-weight: 400; color: ${customTextAlpha}; margin: 0px 6px; padding: 0px;`);
+            }
+            const badgeBg = this._settings.get_boolean('use-custom-colors')
+                ? `rgba(${this._settings.get_string('custom-text-color')}, 0.16)`
+                : (isLightMode ? 'rgba(28, 28, 30, 0.12)' : 'rgba(255, 255, 255, 0.16)');
+            const badgeStyle = `font-size: 7.5pt; font-weight: 700; color: ${customTextStr}; background-color: ${badgeBg}; border-radius: 6px; padding: 1px 5px; margin-right: 5px; max-width: 85px;`;
+            if (this._classicSingerBadge) this._classicSingerBadge.set_style(badgeStyle);
+            if (this._inlineSingerBadge) this._inlineSingerBadge.set_style(badgeStyle);
 
             this._updateTextDisplay();
 
@@ -1334,6 +1438,7 @@ export const MusicPill = GObject.registerClass(
                 if (this._isActiveState && startW > 0 && startW !== targetWidth) {
                     if (this._titleScroll) this._titleScroll.ignoreResizeFor(450);
                     if (this._artistScroll) this._artistScroll.ignoreResizeFor(450);
+                    if (this._lyricScroll) this._lyricScroll.ignoreResizeFor(450);
                     this._body.set_width(startW);
                     if (this._blurBackdrop) {
                         this._blurBackdrop.set_width(startW);
@@ -1371,13 +1476,17 @@ export const MusicPill = GObject.registerClass(
                 }
             }
 
+            this._updateSideBySideTrackWidth();
+
             if (this._idleDimId) { GLib.Source.remove(this._idleDimId); this._idleDimId = null; }
 
             this._idleDimId = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
                 this._idleDimId = null;
                 if (!this.get_parent() || !this.get_stage()) return GLib.SOURCE_REMOVE;
+                this._updateSideBySideTrackWidth();
                 if (this._titleScroll) this._titleScroll._checkResize();
                 if (this._artistScroll) this._artistScroll._checkResize();
+                if (this._lyricScroll) this._lyricScroll._checkResize();
 
                 if (this._isActiveState && this._settings.get_boolean('pill-dynamic-width')
                     && !this._isSidePanel && !this._settings.get_boolean('hide-text')) {
@@ -1422,7 +1531,9 @@ export const MusicPill = GObject.registerClass(
                     if (Math.abs(newTarget - this._targetWidth) > 10) {
                         if (this._titleScroll) this._titleScroll.ignoreResizeFor(350);
                         if (this._artistScroll) this._artistScroll.ignoreResizeFor(350);
+                        if (this._lyricScroll) this._lyricScroll.ignoreResizeFor(350);
                         this._targetWidth = newTarget;
+                        this._updateSideBySideTrackWidth();
                         this._body.ease({
                             width: newTarget,
                             duration: 300,
@@ -1431,6 +1542,7 @@ export const MusicPill = GObject.registerClass(
                                 if (!isFinished) return;
                                 if (this._titleScroll) this._titleScroll._checkResize();
                                 if (this._artistScroll) this._artistScroll._checkResize();
+                                if (this._lyricScroll) this._lyricScroll._checkResize();
                             }
                         });
                         if (this._isBlurActive()) {
@@ -1495,26 +1607,80 @@ export const MusicPill = GObject.registerClass(
             }
         }
 
+        _isSideBySideLyrics() {
+            return Boolean(
+                this._lyricObj && this._lyricObj.content &&
+                this._settings && this._settings.get_boolean('pill-lyrics-show-track-info') &&
+                !this._settings.get_boolean('hide-text') &&
+                !this._isSidePanel
+            );
+        }
+
+        _updateSideBySideTrackWidth() {
+            if (!this._trackInfoBox || !this._titleScroll || !this._settings) return;
+            if (!this._isSideBySideLyrics()) {
+                this._trackInfoBox.x_expand = true;
+                if (this._trackInfoBox.width !== -1) this._trackInfoBox.set_width(-1);
+                return;
+            }
+
+            let targetW = this._targetWidth || this._body?.width || 250;
+            let elementsW = this._padX * 2;
+            let sideMargin = this._settings.get_int('visualizer-padding');
+            if (this._artBin && this._artBin.visible) {
+                let isVisHidden = !this._visBin.visible && !(this._statusPlayBtn && this._statusPlayBtn.visible);
+                elementsW += (this._artBin.width || 0) + (isVisHidden ? 8 : sideMargin);
+            }
+            if (this._tabletControls && this._tabletControls.visible) {
+                elementsW += this._tabletControls.get_preferred_width(-1)[1];
+            }
+            if (this._visBin && this._visBin.visible) {
+                elementsW += this._visBin.get_preferred_width(-1)[1] + sideMargin;
+            }
+            if (this._statusPlayBtn && this._statusPlayBtn.visible) {
+                elementsW += this._statusPlayBtn.get_preferred_width(-1)[1] + sideMargin;
+            }
+
+            let availTextW = Math.max(80, targetW - elementsW - 16);
+            let titleNatW = this._titleScroll.getNaturalTextWidth();
+            let artistNatW = (this._artistScroll && this._artistScroll.visible) ? this._artistScroll.getNaturalTextWidth() : 0;
+            let trackNatW = Math.max(titleNatW, artistNatW);
+            let maxTrackW = Math.max(60, Math.floor(availTextW * 0.42));
+            let trackW = trackNatW > 0 ? Math.min(trackNatW + 2, maxTrackW) : maxTrackW;
+
+            this._trackInfoBox.x_expand = false;
+            if (Math.abs(this._trackInfoBox.width - trackW) > 1) {
+                this._trackInfoBox.set_width(trackW);
+            }
+        }
+
         setLyric(lyricObj) {
             let oldContent = this._lyricObj ? this._lyricObj.content : null;
             let newContent = lyricObj ? lyricObj.content : null;
             let oldTime = this._lyricObj ? this._lyricObj.time : null;
             let newTime = lyricObj ? lyricObj.time : null;
+            let oldSinger = this._lyricObj ? (this._lyricObj.singer || null) : null;
+            let newSinger = lyricObj ? (lyricObj.singer || null) : null;
+            let wasSideBySide = this._isSideBySideLyrics();
 
-            let contentChanged = (oldContent !== newContent || oldTime !== newTime);
+            let contentChanged = (oldContent !== newContent || oldTime !== newTime || oldSinger !== newSinger);
             let wasActive = !!oldContent;
             this._lyricObj = lyricObj;
             let isActive = !!newContent;
+            let isSideBySide = this._isSideBySideLyrics();
+            let sideBySideChanged = (wasSideBySide !== isSideBySide);
 
             if (!this._isActiveState) return;
 
-            if (contentChanged) {
+            if (contentChanged || sideBySideChanged) {
                 this._updateTextDisplay(false);
             }
 
             // Word-level karaoke markup in Pill (updates text markup silently without moving text position)
-            if (this._lyricObj && Array.isArray(this._lyricObj.words) && this._lyricObj.words.length > 0 && this._titleScroll) {
+            const targetScroll = isSideBySide ? this._lyricScroll : this._titleScroll;
+            if (this._lyricObj && Array.isArray(this._lyricObj.words) && this._lyricObj.words.length > 0 && targetScroll) {
                 let currentMs = this._lyricObj.positionMs || 0;
+                let stableWeight = this._settings ? this._settings.get_boolean('pill-stable-karaoke-weight') : true;
                 let markup = "";
                 for (let wIdx = 0; wIdx < this._lyricObj.words.length; wIdx++) {
                     const word = this._lyricObj.words[wIdx];
@@ -1527,18 +1693,22 @@ export const MusicPill = GObject.registerClass(
                         : (/\s$/.test(rawText) || (wIdx < this._lyricObj.words.length - 1 && !/[\u3040-\u9FFF\uAC00-\uD7AF]/.test(wStr)));
                     let space = hasSp ? " " : "";
                     if (currentMs >= word.time) {
-                        markup += `<b><span alpha="100%">${escapedText}</span></b>${space}`;
+                        markup += stableWeight
+                            ? `<span alpha="100%">${escapedText}</span>${space}`
+                            : `<b><span alpha="100%">${escapedText}</span></b>${space}`;
                     } else {
                         markup += `<span alpha="45%">${escapedText}</span>${space}`;
                     }
                 }
                 if (markup) {
-                    this._titleScroll.updateLyricMarkup(markup.trim());
+                    targetScroll.updateLyricMarkup(markup.trim());
                 }
             }
 
-            if (contentChanged && wasActive !== isActive) {
+            if ((contentChanged && wasActive !== isActive) || sideBySideChanged) {
                 this._updateDimensions();
+            } else if (isSideBySide && contentChanged) {
+                this._updateSideBySideTrackWidth();
             }
         }
 
@@ -1703,16 +1873,17 @@ export const MusicPill = GObject.registerClass(
                                 }
                             }
                         });
-                        this._body.ease({
-                            width: finalWidth,
-                            height: finalHeight,
-                            duration: 500,
-                            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                            onStopped: () => {
-                                if (this._titleScroll) this._titleScroll._checkResize();
-                                if (this._artistScroll) this._artistScroll._checkResize();
-                            }
-                        });
+                    this._body.ease({
+                        width: finalWidth,
+                        height: finalHeight,
+                        duration: 500,
+                        mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                        onStopped: () => {
+                            if (this._titleScroll) this._titleScroll._checkResize();
+                            if (this._artistScroll) this._artistScroll._checkResize();
+                            if (this._lyricScroll) this._lyricScroll._checkResize();
+                        }
+                    });
                         if (this._isBlurActive()) {
                             this._blurBackdrop.opacity = 255;
                             this._blurBackdrop.show();
@@ -1992,23 +2163,88 @@ export const MusicPill = GObject.registerClass(
                 a = null;
             }
 
-            if (this._lyricObj && this._lyricObj.content) {
-                t = this._lyricObj.content;
+            let hasLyric = Boolean(this._lyricObj && this._lyricObj.content);
+            let showSingers = this._settings.get_boolean('enable-singer-attribution');
+            let singer = (hasLyric && showSingers && this._lyricObj.singer) ? this._lyricObj.singer : null;
+            let sideBySide = this._isSideBySideLyrics();
+
+            if (sideBySide) {
+                if (this._titleScroll) this._titleScroll.setForceStartAlign(true);
+                if (this._artistScroll) this._artistScroll.setForceStartAlign(true);
+
+                let titleChanged = (this._lastTitle !== t);
+                let artistChanged = (this._lastArtist !== a);
+                if (titleChanged || artistChanged || forceUpdate) {
+                    if (this._titleScroll && (titleChanged || forceUpdate)) {
+                        this._titleScroll.setText(t || _('Loading...'), forceUpdate, 0);
+                    }
+                    if (this._artistScroll && (artistChanged || forceUpdate)) {
+                        this._artistScroll.setText(a || '', forceUpdate);
+                    }
+                    this._lastTitle = t;
+                    this._lastArtist = a;
+                }
+
+                if (this._classicSingerBadge) this._classicSingerBadge.hide();
+                if (this._lyricPipeLabel) this._lyricPipeLabel.show();
+                if (this._lyricInlineBox) this._lyricInlineBox.show();
+
+                if (this._inlineSingerBadge) {
+                    if (singer) {
+                        this._inlineSingerBadge.text = singer;
+                        this._inlineSingerBadge.show();
+                    } else {
+                        this._inlineSingerBadge.hide();
+                    }
+                }
+
+                let lyricContent = this._lyricObj.content;
                 lyricTime = this._lyricObj.time || 0;
-            }
-
-            let titleChanged = (this._lastTitle !== t);
-            let artistChanged = (this._lastArtist !== a);
-
-            if (titleChanged || artistChanged || forceUpdate) {
-                if (this._titleScroll && (titleChanged || forceUpdate)) {
-                    this._titleScroll.setText(t || _('Loading...'), forceUpdate, lyricTime);
+                let lyricChanged = (this._lastInlineLyric !== lyricContent);
+                if (this._lyricScroll && (lyricChanged || forceUpdate)) {
+                    this._lyricScroll.setText(lyricContent, forceUpdate, lyricTime);
+                    this._lastInlineLyric = lyricContent;
                 }
-                if (this._artistScroll && (artistChanged || (forceUpdate && !lyricTime && (!this._lyricObj || !this._lyricObj.content)))) {
-                    this._artistScroll.setText(a || '', forceUpdate);
+                this._updateSideBySideTrackWidth();
+            } else {
+                if (this._titleScroll) this._titleScroll.setForceStartAlign(false);
+                if (this._artistScroll) this._artistScroll.setForceStartAlign(false);
+                if (this._lyricPipeLabel) this._lyricPipeLabel.hide();
+                if (this._lyricInlineBox) this._lyricInlineBox.hide();
+                if (this._inlineSingerBadge) this._inlineSingerBadge.hide();
+                this._lastInlineLyric = null;
+                if (this._trackInfoBox) {
+                    this._trackInfoBox.x_expand = true;
+                    if (this._trackInfoBox.width !== -1) this._trackInfoBox.set_width(-1);
                 }
-                this._lastTitle = t;
-                this._lastArtist = a;
+
+                if (hasLyric) {
+                    t = this._lyricObj.content;
+                    lyricTime = this._lyricObj.time || 0;
+                }
+
+                if (this._classicSingerBadge) {
+                    if (hasLyric && singer) {
+                        this._classicSingerBadge.text = singer;
+                        this._classicSingerBadge.show();
+                    } else {
+                        this._classicSingerBadge.hide();
+                    }
+                }
+
+                let titleChanged = (this._lastTitle !== t);
+                let artistChanged = (this._lastArtist !== a);
+
+                if (titleChanged || artistChanged || forceUpdate) {
+                    if (this._titleScroll && (titleChanged || forceUpdate)) {
+                        this._titleScroll.setText(t || _('Loading...'), forceUpdate, lyricTime);
+                    }
+                    if (this._artistScroll && (artistChanged || (forceUpdate && !lyricTime && !hasLyric))) {
+                        this._artistScroll.setText(a || '', forceUpdate);
+                    }
+                    this._lastTitle = t;
+                    this._lastArtist = a;
+                }
             }
         }
 

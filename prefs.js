@@ -16,7 +16,7 @@ const PREFS_KEYS = [
     'enable-scroll-controls', 'action-left-click', 'action-middle-click',
     'action-right-click', 'action-double-click', 'dock-art-size', 'panel-art-size',
     'popup-enable-shadow', 'popup-follow-transparency', 'popup-follow-radius',
-    'popup-vinyl-rotate', 'visualizer-padding', 'scroll-action', 'volume-scroll-target', 'popup-vinyl-square', 'popup-vinyl-shadow',
+    'popup-vinyl-rotate', 'visualizer-padding', 'scroll-action', 'volume-scroll-target', 'use-mpris-app-volume', 'popup-vinyl-square', 'popup-vinyl-shadow',
     'popup-show-vinyl', 'show-shuffle-loop', 'use-custom-colors', 'custom-bg-color',
     'custom-text-color', 'custom-vis-color', 'tablet-mode', 'pill-controls-position', 'inline-artist', 'show-artist', 'pill-dynamic-width',
     'popup-use-custom-width', 'popup-custom-width', 'player-filter-mode', 'player-filter-list', 'hide-text',
@@ -24,7 +24,10 @@ const PREFS_KEYS = [
     'popup-follow-custom-bg', 'popup-follow-custom-text', 'action-hover', 'hover-delay', 'selected-player-bus',
     'popup-show-player-selector', 'hide-auto-smart-selection', 'popup-player-selector-position', 'show-pill-border', 'invert-scroll-direction', 'always-show-pill', 'popup-hide-on-leave',
     'popup-vertical-offset', 'popup-horizontal-offset',
-    'visualizer-bars', 'enable-lyrics', 'pill-enable-word-level', 'lyrics-language-preference',
+    'visualizer-bars', 'enable-lyrics', 'pill-enable-word-level', 'pill-stable-karaoke-weight',
+    'pill-lyrics-show-track-info', 'pill-hide-lyrics-on-pause', 'enable-singer-attribution',
+    'enable-lyrics-romanization', 'genius-proxy-url', 'genius-access-token',
+    'lyrics-language-preference',
     'local-lyrics-folder', 'lyrics-cache-revision',
     'app-name-mapping', 'lyric-fade-enable', 'lyric-fade-duration', 'visualizer-bar-width', 'visualizer-height',
     'popup-visualizer-bars', 'popup-visualizer-bar-width', 'popup-visualizer-height', 'edge-margin', 'popup-vinyl-speed', 'sync-accent-color',
@@ -806,7 +809,7 @@ export default class DynamicMusicPrefs extends ExtensionPreferences {
             key: 'panel-pill-width',
             title: _('Widget Width'),
             lower: 100,
-            upper: 600,
+            upper: 1200,
             step: 10,
         }));
         panelDimGroup.add(this._createSpinRow(settings, {
@@ -1215,15 +1218,24 @@ export default class DynamicMusicPrefs extends ExtensionPreferences {
             labels: [_('System Master Volume'), _('Active Media App Volume')],
             values: ['system', 'app'],
         });
+        const { row: mprisVolRow } = this._createSwitchRow(settings, {
+            key: 'use-mpris-app-volume',
+            title: _('Persist App Volume via MPRIS'),
+            subtitle: _('Control the player\'s own MPRIS volume (fixes Flatpak Spotify resetting volume on track change)'),
+        });
         const updateVolTargetSensitivity = () => {
             const scrollEnabled = settings.get_boolean('enable-scroll-controls');
             const isVolAction = settings.get_string('scroll-action') === 'volume';
+            const isAppTarget = settings.get_string('volume-scroll-target') === 'app';
             volTargetRow.sensitive = scrollEnabled && isVolAction;
+            mprisVolRow.sensitive = scrollEnabled && isVolAction && isAppTarget;
         };
         settings.connect('changed::enable-scroll-controls', updateVolTargetSensitivity);
         settings.connect('changed::scroll-action', updateVolTargetSensitivity);
+        settings.connect('changed::volume-scroll-target', updateVolTargetSensitivity);
         updateVolTargetSensitivity();
         scrollExpander.add_row(volTargetRow);
+        scrollExpander.add_row(mprisVolRow);
 
         const { row: invertDirRow } = this._createSwitchRow(settings, {
             key: 'invert-scroll-direction',
@@ -1330,6 +1342,74 @@ export default class DynamicMusicPrefs extends ExtensionPreferences {
             subtitle: _('Highlight individual words on the main pill when available (pop-up always uses word-level).'),
             sensitiveKey: 'enable-lyrics',
         }).row);
+
+        const { row: stableKaraokeRow } = this._createSwitchRow(settings, {
+            key: 'pill-stable-karaoke-weight',
+            title: _('Prevent Karaoke Text Shifting'),
+            subtitle: _('Keep font weight constant while words light up so lyrics stay completely still'),
+        });
+        const updateStableKaraokeSensitivity = () => {
+            stableKaraokeRow.sensitive = settings.get_boolean('enable-lyrics') && settings.get_boolean('pill-enable-word-level');
+        };
+        settings.connect('changed::enable-lyrics', updateStableKaraokeSensitivity);
+        settings.connect('changed::pill-enable-word-level', updateStableKaraokeSensitivity);
+        updateStableKaraokeSensitivity();
+        lyricsExpander.add_row(stableKaraokeRow);
+
+        lyricsExpander.add_row(this._createSwitchRow(settings, {
+            key: 'pill-lyrics-show-track-info',
+            title: _('Show Track & Artist Beside Lyrics'),
+            subtitle: _('Display "Title • Artist | Lyric" side-by-side in the pill'),
+            sensitiveKey: 'enable-lyrics',
+        }).row);
+
+        lyricsExpander.add_row(this._createSwitchRow(settings, {
+            key: 'pill-hide-lyrics-on-pause',
+            title: _('Hide Lyrics When Paused'),
+            subtitle: _('Show only the song title and artist while playback is paused'),
+            sensitiveKey: 'enable-lyrics',
+        }).row);
+
+        lyricsExpander.add_row(this._createSwitchRow(settings, {
+            key: 'enable-lyrics-romanization',
+            title: _('Romanize Non-Latin Lyrics'),
+            subtitle: _('Replace Korean, Japanese kana, Cyrillic, and Greek lines with romanized Latin text'),
+            sensitiveKey: 'enable-lyrics',
+        }).row);
+
+        lyricsExpander.add_row(this._createSwitchRow(settings, {
+            key: 'enable-singer-attribution',
+            title: _('Show Singer Names (Genius)'),
+            subtitle: _('Display who is singing each line in group songs and collaborations'),
+            sensitiveKey: 'enable-lyrics',
+        }).row);
+
+        const geniusAdvExpander = new Adw.ExpanderRow({
+            title: this._escapeMarkup(_('Genius Lookup Options (Optional)')),
+            subtitle: this._escapeMarkup(_('Direct Genius lookup works out of the box; optionally configure a proxy or API token')),
+            expanded: false,
+        });
+        const proxyEntryRow = new Adw.EntryRow({
+            title: this._escapeMarkup(_('Genius Proxy URL')),
+            text: settings.get_string('genius-proxy-url'),
+        });
+        settings.bind('genius-proxy-url', proxyEntryRow, 'text', Gio.SettingsBindFlags.DEFAULT);
+        geniusAdvExpander.add_row(proxyEntryRow);
+
+        const tokenEntryRow = new Adw.EntryRow({
+            title: this._escapeMarkup(_('Genius Client Access Token')),
+            text: settings.get_string('genius-access-token'),
+        });
+        settings.bind('genius-access-token', tokenEntryRow, 'text', Gio.SettingsBindFlags.DEFAULT);
+        geniusAdvExpander.add_row(tokenEntryRow);
+
+        const updateGeniusAdvSensitivity = () => {
+            geniusAdvExpander.sensitive = settings.get_boolean('enable-lyrics') && settings.get_boolean('enable-singer-attribution');
+        };
+        settings.connect('changed::enable-lyrics', updateGeniusAdvSensitivity);
+        settings.connect('changed::enable-singer-attribution', updateGeniusAdvSensitivity);
+        updateGeniusAdvSensitivity();
+        lyricsExpander.add_row(geniusAdvExpander);
 
         lyricsExpander.add_row(this._createIntComboRow(settings, {
             key: 'lyrics-language-preference',
