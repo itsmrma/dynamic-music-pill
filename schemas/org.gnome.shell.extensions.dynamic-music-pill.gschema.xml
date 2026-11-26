@@ -27,6 +27,11 @@
       <summary>Volume Scroll Target</summary>
       <description>Target for volume scroll action (system master volume or current app volume)</description>
     </key>
+    <key name="use-mpris-app-volume" type="b">
+      <default>true</default>
+      <summary>Use MPRIS Volume for App Control</summary>
+      <description>Control the player's own MPRIS Volume property instead of the PipeWire/PulseAudio stream volume (persists across track changes in players like Spotify Flatpak).</description>
+    </key>
 	<key name="hide-text" type="b">
 	<default>false</default>
 	<summary>Hide title and artist entirely</summary>
@@ -352,7 +357,7 @@
     </key>
     <key name="panel-pill-width" type="i">
       <default>250</default>
-      <range min="100" max="600"/>
+      <range min="100" max="1200"/>
     </key>
     <key name="pill-height" type="i">
       <default>56</default>
@@ -413,6 +418,41 @@
       <default>true</default>
       <summary>Enable Word-Level Karaoke in Pill</summary>
       <description>Show word-by-word karaoke highlight on the main pill when available</description>
+    </key>
+    <key name="pill-stable-karaoke-weight" type="b">
+      <default>true</default>
+      <summary>Prevent Karaoke Text Shifting</summary>
+      <description>Keep font weight constant during word-level karaoke highlighting so text does not jitter or shift horizontally.</description>
+    </key>
+    <key name="pill-lyrics-show-track-info" type="b">
+      <default>true</default>
+      <summary>Show Track Info Alongside Lyrics</summary>
+      <description>Keep displaying song title and artist next to the active lyric line separated by a pipe (|).</description>
+    </key>
+    <key name="pill-hide-lyrics-on-pause" type="b">
+      <default>true</default>
+      <summary>Hide Lyrics When Paused</summary>
+      <description>Hide the active lyric line when playback is paused so only the song title and artist are shown.</description>
+    </key>
+    <key name="enable-singer-attribution" type="b">
+      <default>true</default>
+      <summary>Show Singer Attribution</summary>
+      <description>Display the vocalist name for each lyric line using Genius sections and native TTML metadata.</description>
+    </key>
+    <key name="enable-lyrics-romanization" type="b">
+      <default>true</default>
+      <summary>Romanize Non-Latin Lyrics</summary>
+      <description>Replace non-Latin scripts (Korean, Japanese kana, Cyrillic, Greek) with romanized Latin text.</description>
+    </key>
+    <key name="genius-proxy-url" type="s">
+      <default>''</default>
+      <summary>Genius Proxy URL (Optional)</summary>
+      <description>Optional Cloudflare Worker URL for Genius singer lookup.</description>
+    </key>
+    <key name="genius-access-token" type="s">
+      <default>''</default>
+      <summary>Genius Access Token (Optional)</summary>
+      <description>Optional Genius API client access token for song search.</description>
     </key>
     <key name="lyrics-language-preference" type="i">
       <default>0</default>

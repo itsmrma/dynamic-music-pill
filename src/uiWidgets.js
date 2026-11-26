@@ -128,7 +128,9 @@ export const ScrollLabel = GObject.registerClass(
             this._hoverOnly = settings.get_boolean('scroll-on-hover-only');
             this._hovered = false;
             this._forceScroll = false;
+            this._forceStartAlign = false;
             this._pendingScrollStop = false;
+            this._lastMarkup = null;
             this._lastAllocatedWidth = 0;
             this._container = new PixelSnappedBox({ x_expand: true, y_expand: true, x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER });
             this._container.layout_manager.orientation = Clutter.Orientation.HORIZONTAL;
@@ -268,7 +270,7 @@ export const ScrollLabel = GObject.registerClass(
                     let overflows = (boxWidth > 1) && (textWidth > boxWidth + 2);
 
                     this._stopAnimation(true);
-                    this._container.x_align = overflows ? Clutter.ActorAlign.START : Clutter.ActorAlign.CENTER;
+                    this._container.x_align = (overflows || this._forceStartAlign) ? Clutter.ActorAlign.START : Clutter.ActorAlign.CENTER;
                     if (overflows) {
                         this._setFadeOutEffect(false, true, true);
                     }
@@ -311,6 +313,17 @@ export const ScrollLabel = GObject.registerClass(
             if (force) this._checkResize();
         }
 
+        setForceStartAlign(force) {
+            const next = Boolean(force);
+            if (this._forceStartAlign === next) return;
+            this._forceStartAlign = next;
+            if (!this._isScrolling && this.has_allocation()) {
+                let boxWidth = this.get_allocation_box().get_width();
+                let textW = (boxWidth > 1) ? this.getNaturalTextWidth() : 0;
+                this._applyStaticAlignment((boxWidth > 1) && (textW > boxWidth + 2));
+            }
+        }
+
         setPendingScrollStop(stop) {
             this._pendingScrollStop = stop;
         }
@@ -329,7 +342,7 @@ export const ScrollLabel = GObject.registerClass(
         }
 
         _applyStaticAlignment(overflows) {
-            const align = overflows ? Clutter.ActorAlign.START : Clutter.ActorAlign.CENTER;
+            const align = (overflows || this._forceStartAlign) ? Clutter.ActorAlign.START : Clutter.ActorAlign.CENTER;
             this._container.x_align = align;
             this._label1.clutter_text.ellipsize = Pango.EllipsizeMode.END;
             this._label1.x_expand = true;
@@ -386,7 +399,8 @@ export const ScrollLabel = GObject.registerClass(
         }
 
         updateLyricMarkup(markup) {
-            if (!markup) return;
+            if (!markup || this._lastMarkup === markup) return;
+            this._lastMarkup = markup;
             if (this._label1 && this._label1.clutter_text) {
                 this._label1.clutter_text.set_markup(markup);
                 if (this._label2 && this._label2.clutter_text && this._isScrolling) {
@@ -400,6 +414,7 @@ export const ScrollLabel = GObject.registerClass(
             this._text = text || "";
             this._lyricTime = lyricTime;
             this._pendingScrollStop = false;
+            this._lastMarkup = null;
 
             this._stopAnimation(true);
             this._lyricFinished = false;

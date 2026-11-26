@@ -12,6 +12,7 @@ import { smartUnpack, initDTDModule, resetDTDModule, getDockManager, getPlayerIc
 import { getMixerControl } from 'resource:///org/gnome/shell/ui/status/volume.js';
 import { MusicPill, ExpandedPlayer, PlayerSelectorMenu } from './ui.js';
 import { LyricsClient } from './LyricsClient.js';
+import { GeniusSingerClient } from './GeniusSingerAttribution.js';
 import { Extension, gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
 import { SharedVisualizerEngine } from './visualizerEngine.js';
 import { getDockContainer, getSecondaryDockContainers } from './dockIntegration.js';
@@ -118,6 +119,8 @@ export class MusicController {
 
         // Network lyrics acquisition related
         this._lyricsClient = new LyricsClient();
+        this._geniusSingerClient = new GeniusSingerClient();
+        this._geniusWaitTimerId = null;
         this._fetchedLyricsData = null;
         this._fetchedTrackKey = null;
         this._lyricsTimerId = null;
@@ -157,6 +160,9 @@ export class MusicController {
     enable() {
         if (!this._lyricsClient) {
             this._lyricsClient = new LyricsClient();
+        }
+        if (!this._geniusSingerClient) {
+            this._geniusSingerClient = new GeniusSingerClient();
         }
         if (!this._cancellable || this._cancellable.is_cancelled()) {
             this._cancellable = new Gio.Cancellable();
@@ -299,6 +305,38 @@ export class MusicController {
             'changed::lyrics-language-preference', () => this._refetchCurrentLyrics(),
             'changed::lyrics-cache-revision', () => this._refetchCurrentLyrics(),
             'changed::local-lyrics-folder', () => this._refetchCurrentLyrics(),
+            'changed::enable-lyrics-romanization', () => {
+                if (this._fetchedLyricsData) this._onLyricsTick(true);
+            },
+            'changed::pill-stable-karaoke-weight', () => {
+                if (this._fetchedLyricsData) this._onLyricsTick(true);
+            },
+            'changed::enable-singer-attribution', () => {
+                if (this._settings.get_boolean('enable-singer-attribution')) {
+                    this._refetchCurrentLyrics();
+                } else if (this._fetchedLyricsData) {
+                    this._onLyricsTick(true);
+                }
+            },
+            'changed::genius-proxy-url', () => {
+                if (this._geniusSingerClient) this._geniusSingerClient.clearCache();
+                if (this._settings.get_boolean('enable-singer-attribution')) this._refetchCurrentLyrics();
+            },
+            'changed::genius-access-token', () => {
+                if (this._geniusSingerClient) this._geniusSingerClient.clearCache();
+                if (this._settings.get_boolean('enable-singer-attribution')) this._refetchCurrentLyrics();
+            },
+            'changed::pill-hide-lyrics-on-pause', () => {
+                const active = this._getActivePlayer();
+                if (!active || active.PlaybackStatus !== 'Playing') {
+                    if (this._settings.get_boolean('pill-hide-lyrics-on-pause')) {
+                        this._lastLyricIndex = -1;
+                        this._pills().forEach(p => p.setLyric(null));
+                    } else if (this._fetchedLyricsData && this._fetchedLyricsSynced) {
+                        this._onLyricsTick(true);
+                    }
+                }
+            },
             this
         );
         this._settings.connectObject(
@@ -439,9 +477,17 @@ export class MusicController {
 
         // Clear the web lyrics
         this._stopLyricsTimer();
+        if (this._geniusWaitTimerId) {
+            GLib.Source.remove(this._geniusWaitTimerId);
+            this._geniusWaitTimerId = null;
+        }
         if (this._lyricsClient) {
             this._lyricsClient.destroy();
             this._lyricsClient = null;
+        }
+        if (this._geniusSingerClient) {
+            this._geniusSingerClient.destroy();
+            this._geniusSingerClient = null;
         }
         this._fetchedLyricsData = null;
         this._fetchedTrackKey = null;
@@ -1288,6 +1334,12 @@ export class MusicController {
                         if (s === 'Playing') p._lastPlayingTime = now;
                     }
 
+                    if (keys.Volume !== undefined) {
+                        if (Date.now() - (p._pendingMprisVolTime || 0) > 350) {
+                            p._pendingMprisVol = undefined;
+                        }
+                    }
+
                     if (keys.Position !== undefined) {
                         let posVal = keys.Position instanceof GLib.Variant ? keys.Position.unpack() : keys.Position;
                         if (typeof posVal === 'number' && posVal >= 0) {
@@ -1601,7 +1653,8 @@ export class MusicController {
             let active = this._getActivePlayer();
             let activeBus = active ? (active._busName || "") : "";
 
-            if (!active || lrc.content === "" || !activeBus.includes(lrc.sender)) {
+            if (!active || lrc.content === "" || !activeBus.includes(lrc.sender) ||
+                (this._settings.get_boolean('pill-hide-lyrics-on-pause') && active.PlaybackStatus !== 'Playing')) {
                 this._pills().forEach(p => p.setLyric(null));
                 this._dbusLyricActive = false;
             } else {
@@ -1670,10 +1723,17 @@ export class MusicController {
         this._lastLyricIndex = -1;
 
         try {
+            const enableSingers = Boolean(
+                this._settings && this._settings.get_boolean('enable-singer-attribution') && this._geniusSingerClient
+            );
+            const geniusPromise = enableSingers
+                ? this._geniusSingerClient.fetchGeniusSections(title, artist, this._settings).catch(() => null)
+                : null;
+
             let res = await this._lyricsClient.getLyrics(
                 title, artist, album, durationSec, this._settings, asText, trackUrl
             );
-            if (this._fetchedTrackKey !== trackKey) return;
+            if (this._fetchedTrackKey !== trackKey || !this._settings || this._cancellable?.is_cancelled()) return;
 
             if (res && res.lines) {
                 this._fetchedLyricsData = res.lines;
@@ -1687,6 +1747,44 @@ export class MusicController {
                 this._fetchedLyricsData = null;
                 this._fetchedLyricsProvider = null;
                 this._fetchedLyricsSynced = false;
+            }
+
+            if (enableSingers && this._fetchedLyricsData && this._fetchedLyricsData.length > 0 && this._geniusSingerClient) {
+                const enrichJob = this._geniusSingerClient.enrichLinesWithSingers(
+                    this._fetchedLyricsData, title, artist, this._settings, geniusPromise
+                ).catch(() => false);
+
+                if (this._geniusWaitTimerId) {
+                    GLib.Source.remove(this._geniusWaitTimerId);
+                    this._geniusWaitTimerId = null;
+                }
+                const outcome = await Promise.race([
+                    enrichJob.then(() => 'done'),
+                    new Promise((resolve) => {
+                        this._geniusWaitTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 800, () => {
+                            this._geniusWaitTimerId = null;
+                            resolve('late');
+                            return GLib.SOURCE_REMOVE;
+                        });
+                    }),
+                ]);
+                if (this._geniusWaitTimerId) {
+                    GLib.Source.remove(this._geniusWaitTimerId);
+                    this._geniusWaitTimerId = null;
+                }
+                if (this._fetchedTrackKey !== trackKey || !this._settings || this._cancellable?.is_cancelled()) return;
+
+                if (outcome === 'late') {
+                    enrichJob.then((updated) => {
+                        if (!updated) return;
+                        if (this._fetchedTrackKey !== trackKey || !this._settings || this._cancellable?.is_cancelled()) return;
+                        if (this._fetchedLyricsSynced) this._onLyricsTick();
+                        if (this._expandedPlayer && this._expandedPlayer._lyricsWidget && this._expandedPlayer._lyricsWidget.get_parent()) {
+                            this._expandedPlayer._lyricsWidget.setLyrics(this._fetchedLyricsData, this._fetchedLyricsProvider);
+                            this._expandedPlayer._lyricsWidget.updatePosition(this._expandedPlayer._getCurrentPositionMs());
+                        }
+                    }).catch(() => {});
+                }
             }
 
             this._lastLyricIndex = -1;
@@ -1765,7 +1863,7 @@ export class MusicController {
         );
     }
 
-    _onLyricsTick() {
+    _onLyricsTick(allowWhenPaused = false) {
 
         if (!this._settings || !this._settings.get_boolean('enable-lyrics')) {
             this._stopLyricsTimer();
@@ -1775,7 +1873,15 @@ export class MusicController {
         if (this._dbusLyricActive) return;
 
         let active = this._getActivePlayer();
-        if (!active || active.PlaybackStatus !== 'Playing') return;
+        if (!active) return;
+        if (active.PlaybackStatus !== 'Playing') {
+            if (this._settings.get_boolean('pill-hide-lyrics-on-pause')) {
+                this._lastLyricIndex = -1;
+                this._pills().forEach(p => p.setLyric(null));
+                return;
+            }
+            if (!allowWhenPaused) return;
+        }
 
         let now = Date.now();
         if (!this._lastPositionSync || now - this._lastPositionSync > 1000) {
@@ -1824,13 +1930,21 @@ export class MusicController {
             }
 
             let enablePillWordLevel = this._settings ? this._settings.get_boolean('pill-enable-word-level') : true;
+            let useRomanization = this._settings ? this._settings.get_boolean('enable-lyrics-romanization') : true;
+            let showSingers = this._settings ? this._settings.get_boolean('enable-singer-attribution') : true;
+
+            let displayText = (useRomanization && currentLine.romanizedText) ? currentLine.romanizedText : currentLine.text;
+            let displayWords = (useRomanization && Array.isArray(currentLine.romanizedWords) && currentLine.romanizedWords.length > 0)
+                ? currentLine.romanizedWords
+                : (currentLine.words || null);
 
             let lrc = {
                 sender: this._fetchedLyricsProvider || "lrclib",
-                content: currentLine.text,
+                content: displayText,
                 time: currentLine.duration,
-                words: enablePillWordLevel ? (currentLine.words || null) : null,
+                words: enablePillWordLevel ? displayWords : null,
                 positionMs: positionMs,
+                singer: showSingers ? (currentLine.singer || null) : null,
             };
             this._pills().forEach(p => p.setLyric(lrc));
         } else if (this._lastLyricIndex !== -1) {
@@ -2240,8 +2354,13 @@ export class MusicController {
                         this._fetchNetworkLyrics(active);
                     } else if (this._fetchedLyricsData && this._fetchedLyricsSynced && active.PlaybackStatus === 'Playing') {
                         this._startLyricsTimer();
+                        this._onLyricsTick();
                     } else if (active.PlaybackStatus !== 'Playing') {
                         this._stopLyricsTimer();
+                        if (this._settings.get_boolean('pill-hide-lyrics-on-pause')) {
+                            this._lastLyricIndex = -1;
+                            this._pills().forEach(p => p.setLyric(null));
+                        }
                     }
                 }
 
@@ -2685,8 +2804,65 @@ export class MusicController {
         return { stream: fallback, mixer };
     }
 
-    changeVolume(up) {
-        let volTarget = this._settings ? this._settings.get_string('volume-scroll-target') : 'system';
+    _getMprisVolume(player) {
+        if (!player || player._mprisVolumeUnsupported) return null;
+        if (typeof player._pendingMprisVol === 'number' && (Date.now() - (player._pendingMprisVolTime || 0)) < 400) {
+            return player._pendingMprisVol;
+        }
+        const v = player.get_cached_property('Volume');
+        if (v === null || v === undefined) return null;
+        const val = v.unpack();
+        return (typeof val === 'number' && Number.isFinite(val)) ? Math.max(0, Math.min(1, val)) : null;
+    }
+
+    _setMprisVolume(player, vol, onError = null) {
+        if (!player || !this._connection) return false;
+        const clamped = Math.max(0, Math.min(1, vol));
+        player._pendingMprisVol = clamped;
+        player._pendingMprisVolTime = Date.now();
+        this._connection.call(
+            player._busName,
+            '/org/mpris/MediaPlayer2',
+            'org.freedesktop.DBus.Properties',
+            'Set',
+            new GLib.Variant('(ssv)', ['org.mpris.MediaPlayer2.Player', 'Volume', new GLib.Variant('d', clamped)]),
+            null,
+            Gio.DBusCallFlags.NONE,
+            -1,
+            null,
+            (conn, res) => {
+                try {
+                    conn.call_finish(res);
+                } catch (e) {
+                    console.debug(`[Dynamic Music Pill] MPRIS Volume Set failed for ${player._busName}: ${e.message}`);
+                    player._mprisVolumeUnsupported = true;
+                    player._pendingMprisVol = undefined;
+                    if (onError) onError(e);
+                }
+            }
+        );
+        return true;
+    }
+
+    _tryChangeMprisVolume(player, up) {
+        const current = this._getMprisVolume(player);
+        if (current === null) return false;
+        const step = 0.05;
+        const next = Math.max(0, Math.min(1, current + (up ? step : -step)));
+        const ok = this._setMprisVolume(player, next, () => {
+            this._changeStreamVolume(up, 'app');
+        });
+        if (!ok) return false;
+
+        let iconName = 'audio-volume-high-symbolic';
+        if (next === 0) iconName = 'audio-volume-muted-symbolic';
+        else if (next < 0.33) iconName = 'audio-volume-low-symbolic';
+        else if (next < 0.66) iconName = 'audio-volume-medium-symbolic';
+        this._showPillFeedback(iconName, '', next);
+        return true;
+    }
+
+    _changeStreamVolume(up, volTarget = 'system') {
         let stream = null;
         let mixer = getMixerControl();
         if (!mixer) return;
@@ -2724,6 +2900,20 @@ export class MusicController {
         else if (percent < 0.66) iconName = 'audio-volume-medium-symbolic';
 
         this._showPillFeedback(iconName, '', percent);
+    }
+
+    changeVolume(up) {
+        let volTarget = this._settings ? this._settings.get_string('volume-scroll-target') : 'system';
+        let useMprisVol = this._settings ? this._settings.get_boolean('use-mpris-app-volume') : true;
+
+        if (volTarget === 'app' && useMprisVol) {
+            let active = this._getActivePlayer();
+            if (active && this._tryChangeMprisVolume(active, up)) {
+                return;
+            }
+        }
+
+        this._changeStreamVolume(up, volTarget);
     }
 
     switchPlayer(isNext) {

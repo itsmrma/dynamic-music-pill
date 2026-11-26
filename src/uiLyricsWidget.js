@@ -10,7 +10,7 @@ import St from 'gi://St';
 export const LyricsWidget = GObject.registerClass(
     class LyricsWidget extends St.DrawingArea {
 
-        _init(seekCallback = null) {
+        _init(seekCallback = null, settings = null) {
             super._init({
                 reactive: true,
                 can_focus: false,
@@ -20,6 +20,7 @@ export const LyricsWidget = GObject.registerClass(
             });
 
             this._seekCallback = seekCallback;
+            this._settings = settings;
             this._state = 'loading';
             this._lyrics = [];
             this._activeIndex = -1;
@@ -62,6 +63,33 @@ export const LyricsWidget = GObject.registerClass(
             this.connect('leave-event', () => this._onLeave());
             this.connect('scroll-event', (actor, event) => this._onScroll(actor, event));
             this.connect('destroy', () => this._cleanup());
+
+            if (this._settings) {
+                this._settings.connectObject(
+                    'changed::enable-lyrics-romanization', () => {
+                        this._geomBuilt = false;
+                        this.queue_repaint();
+                    },
+                    'changed::enable-singer-attribution', () => {
+                        this._geomBuilt = false;
+                        this.queue_repaint();
+                    },
+                    'changed::pill-stable-karaoke-weight', () => this.queue_repaint(),
+                    this
+                );
+            }
+        }
+
+        _getLineDisplay(line) {
+            if (!line) return { text: '', words: null, singer: null };
+            const useRom = this._settings ? this._settings.get_boolean('enable-lyrics-romanization') : true;
+            const showSingers = this._settings ? this._settings.get_boolean('enable-singer-attribution') : true;
+            const text = (useRom && line.romanizedText) ? line.romanizedText : (line.text || '');
+            const words = (useRom && Array.isArray(line.romanizedWords) && line.romanizedWords.length > 0)
+                ? line.romanizedWords
+                : (line.words || null);
+            const singer = (showSingers && line.singer) ? line.singer : null;
+            return { text, words, singer };
         }
 
 
@@ -156,13 +184,40 @@ export const LyricsWidget = GObject.registerClass(
                 Pango.FontDescription.from_string(`Sans Bold ${this._SZ}`)
             );
 
+            const singerLayout = PangoCairo.create_layout(cr);
+            singerLayout.set_width(textW * Pango.SCALE);
+            singerLayout.set_wrap(Pango.WrapMode.WORD_CHAR);
+            singerLayout.set_alignment(Pango.Alignment.CENTER);
+            singerLayout.set_font_description(Pango.FontDescription.from_string('Sans Bold 9'));
+
             this._geoms = [];
             let curY = 40;
+            let prevSinger = null;
             for (let i = 0; i < this._lyrics.length; i++) {
-                layout.set_text(this._lyrics[i].text, -1);
+                const disp = this._getLineDisplay(this._lyrics[i]);
+                let showSinger = (disp.singer && disp.singer !== prevSinger) ? disp.singer : null;
+                prevSinger = disp.singer || null;
+
+                let singerH = 0;
+                if (showSinger) {
+                    singerLayout.set_text(showSinger, -1);
+                    let [, sLog] = singerLayout.get_extents();
+                    singerH = Math.ceil(sLog.height / Pango.SCALE) + 3;
+                }
+
+                layout.set_text(disp.text, -1);
                 let [, log] = layout.get_extents();
-                let slotH = log.height / Pango.SCALE;
-                this._geoms.push({ y: curY, slotH, text: this._lyrics[i].text });
+                let textH = log.height / Pango.SCALE;
+                let slotH = singerH + textH;
+                this._geoms.push({
+                    y: curY,
+                    slotH,
+                    text: disp.text,
+                    words: disp.words,
+                    singer: showSinger,
+                    singerH,
+                    textYOffset: singerH,
+                });
                 curY += slotH + this._GAP;
             }
             this._totalH = Math.max(0, curY - this._GAP);
@@ -554,14 +609,15 @@ export const LyricsWidget = GObject.registerClass(
                 alpha = Math.max(0, Math.min(1, alpha));
                 if (alpha < 0.01) continue;
 
-                let lineObj = this._lyrics[i];
-                let isWordLevel = (i === this._activeIndex && lineObj && Array.isArray(lineObj.words) && lineObj.words.length > 0);
+                let dispWords = geo.words;
+                let isWordLevel = (i === this._activeIndex && Array.isArray(dispWords) && dispWords.length > 0);
+                let stableWeight = this._settings ? this._settings.get_boolean('pill-stable-karaoke-weight') : true;
 
                 if (isWordLevel) {
                     let currentMs = this._currentTimeMs || 0;
                     let markup = "";
-                    for (let wIdx = 0; wIdx < lineObj.words.length; wIdx++) {
-                        const word = lineObj.words[wIdx];
+                    for (let wIdx = 0; wIdx < dispWords.length; wIdx++) {
+                        const word = dispWords[wIdx];
                         let rawText = word.text || "";
                         let wStr = rawText.trim();
                         if (!wStr) continue;
@@ -569,11 +625,13 @@ export const LyricsWidget = GObject.registerClass(
                         let hasSp = typeof word.hasSpace === "boolean"
                             ? word.hasSpace
                             : (/\s$/.test(rawText) ||
-                                (wIdx < lineObj.words.length - 1 && !/[\u3040-\u9FFF\uAC00-\uD7AF]/.test(wStr)));
+                                (wIdx < dispWords.length - 1 && !/[\u3040-\u9FFF\uAC00-\uD7AF]/.test(wStr)));
                         let space = hasSp ? " " : "";
 
                         if (currentMs >= word.time) {
-                            markup += `<b><span alpha="100%">${escapedText}</span></b>${space}`;
+                            markup += stableWeight
+                                ? `<span alpha="100%">${escapedText}</span>${space}`
+                                : `<b><span alpha="100%">${escapedText}</span></b>${space}`;
                         } else {
                             markup += `<span alpha="40%">${escapedText}</span>${space}`;
                         }
@@ -584,8 +642,24 @@ export const LyricsWidget = GObject.registerClass(
                     layout.set_text(geo.text, -1);
                 }
 
-                cr.setSourceRGBA(R, G, B, alpha);
                 let scale = this._lineScale[i] ?? 1.0;
+                const drawLine = () => {
+                    if (geo.singer) {
+                        const sLayout = PangoCairo.create_layout(cr);
+                        sLayout.set_width((width - this._PAD_X * 2) * Pango.SCALE);
+                        sLayout.set_wrap(Pango.WrapMode.WORD_CHAR);
+                        sLayout.set_alignment(Pango.Alignment.CENTER);
+                        sLayout.set_font_description(Pango.FontDescription.from_string('Sans Bold 9'));
+                        sLayout.set_text(geo.singer, -1);
+                        cr.setSourceRGBA(R, G, B, alpha * 0.65);
+                        cr.moveTo(this._PAD_X, slotY);
+                        PangoCairo.show_layout(cr, sLayout);
+                    }
+                    cr.setSourceRGBA(R, G, B, alpha);
+                    cr.moveTo(this._PAD_X, slotY + (geo.textYOffset || 0));
+                    PangoCairo.show_layout(cr, layout);
+                };
+
                 if (scale !== 1.0) {
                     let cx = width / 2;
                     let cy = slotY + geo.slotH / 2;
@@ -593,12 +667,10 @@ export const LyricsWidget = GObject.registerClass(
                     cr.translate(cx, cy);
                     cr.scale(scale, scale);
                     cr.translate(-cx, -cy);
-                    cr.moveTo(this._PAD_X, slotY);
-                    PangoCairo.show_layout(cr, layout);
+                    drawLine();
                     cr.restore();
                 } else {
-                    cr.moveTo(this._PAD_X, slotY);
-                    PangoCairo.show_layout(cr, layout);
+                    drawLine();
                 }
             }
 
@@ -608,6 +680,10 @@ export const LyricsWidget = GObject.registerClass(
 
         _cleanup() {
             this._hoverIndex = -1;
+            if (this._settings) {
+                this._settings.disconnectObject(this);
+                this._settings = null;
+            }
             this._stopScrollAnim();
             this._stopAlphaAnim();
             this._stopHoverAnim();

@@ -1643,7 +1643,7 @@ export const ExpandedPlayer = GObject.registerClass(
                 }
             };
 
-            let lyricsWidget = new LyricsWidget(seekCb);
+            let lyricsWidget = new LyricsWidget(seekCb, this._settings);
             lyricsWidget.showLoading();
 
             lyricsWidget.x_expand = true;
@@ -1780,6 +1780,20 @@ export const ExpandedPlayer = GObject.registerClass(
                     }
                     lyricsWidget.setLyrics(lines, provider);
                     lyricsWidget.updatePosition(this._getCurrentPositionMs());
+
+                    if (this._settings && this._settings.get_boolean('enable-singer-attribution') &&
+                        this._controller && this._controller._geniusSingerClient &&
+                        !lines.some(l => Boolean(l.singer))) {
+                        this._controller._geniusSingerClient.enrichLinesWithSingers(
+                            lines, fetchTitle, fetchArtist, this._settings
+                        ).then((updated) => {
+                            if (!updated) return;
+                            if (page !== this._currentSubPage || !page.get_parent()) return;
+                            if (!lyricsWidget || !lyricsWidget.get_parent()) return;
+                            lyricsWidget.setLyrics(lines, provider);
+                            lyricsWidget.updatePosition(this._getCurrentPositionMs());
+                        }).catch(() => {});
+                    }
                 } else {
                     lyricsWidget.showEmpty();
                 }
@@ -1861,8 +1875,15 @@ export const ExpandedPlayer = GObject.registerClass(
                 let addedStreamIds = new Set();
                 if (streamsToShow.length > 0) addedStreamIds.add(streamsToShow[0].stream.id || streamsToShow[0].stream);
 
+                let useMprisVol = this._settings ? this._settings.get_boolean('use-mpris-app-volume') : true;
                 let proxies = Array.from(this._controller._proxies.values());
                 for (let p of proxies) {
+                    let mprisVol = useMprisVol ? this._controller._getMprisVolume(p) : null;
+                    if (mprisVol !== null) {
+                        let name = p._identity || _('Player');
+                        streamsToShow.push({ mprisPlayer: p, title: name, isMaster: false });
+                        continue;
+                    }
                     let { stream } = this._controller._getAppStream(p);
                     if (stream && !addedStreamIds.has(stream.id || stream)) {
                         addedStreamIds.add(stream.id || stream);
@@ -1879,7 +1900,7 @@ export const ExpandedPlayer = GObject.registerClass(
                 let allSliders = [];
 
                 for (let item of streamsToShow) {
-                    let { stream, title, isMaster } = item;
+                    let { stream, mprisPlayer, title, isMaster } = item;
                     let wrapper = new St.BoxLayout({ orientation: Clutter.Orientation.VERTICAL, style: 'margin-bottom: 12px;' });
                     
                     let titleBox = new St.BoxLayout({ orientation: Clutter.Orientation.HORIZONTAL, style: 'margin-bottom: 6px;', x_align: Clutter.ActorAlign.START });
@@ -1892,7 +1913,15 @@ export const ExpandedPlayer = GObject.registerClass(
                     titleBox.add_child(new St.Label({ text: title, style: `color:${ta};font-size:9pt;font-weight:bold;`, y_align: Clutter.ActorAlign.CENTER }));
                     wrapper.add_child(titleBox);
 
-                    let frac0 = stream.is_muted ? 0 : Math.min(1, stream.volume / maxVol);
+                    const getFrac = () => {
+                        if (mprisPlayer) {
+                            const v = this._controller._getMprisVolume(mprisPlayer);
+                            return v !== null ? v : 0;
+                        }
+                        return stream.is_muted ? 0 : Math.min(1, stream.volume / maxVol);
+                    };
+
+                    let frac0 = getFrac();
                     let sliderRow = new St.BoxLayout({ orientation: Clutter.Orientation.HORIZONTAL, style: 'spacing: 10px;', x_expand: true });
                     let sliderBg = new St.Widget({
                         name: 'subpage-slider-bg',
@@ -1924,9 +1953,13 @@ export const ExpandedPlayer = GObject.registerClass(
                     };
                     const applyVol = (f) => {
                         f = Math.max(0, Math.min(1, f));
-                        stream.volume = Math.round(f * maxVol);
-                        stream.push_volume();
-                        if (stream.is_muted && f > 0) stream.change_is_muted(false);
+                        if (mprisPlayer) {
+                            this._controller._setMprisVolume(mprisPlayer, f);
+                        } else {
+                            stream.volume = Math.round(f * maxVol);
+                            stream.push_volume();
+                            if (stream.is_muted && f > 0) stream.change_is_muted(false);
+                        }
                     };
 
                     let _lastApplyTime = 0;
@@ -1953,18 +1986,23 @@ export const ExpandedPlayer = GObject.registerClass(
                     const syncFromStream = () => {
                         if (!sliderBg.get_parent()) return;
                         if (sliderBg._drag) return;
-                        let f = stream.is_muted ? 0 : Math.min(1, stream.volume / maxVol);
-                        upd(f);
+                        upd(getFrac());
                     };
 
-                    stream.connectObject('notify::volume', syncFromStream, subpage);
-                    stream.connectObject('notify::is-muted', syncFromStream, subpage);
+                    if (mprisPlayer) {
+                        mprisPlayer.connectObject('g-properties-changed', (_proxy, changed) => {
+                            if (changed.deep_unpack().Volume !== undefined) syncFromStream();
+                        }, subpage);
+                    } else {
+                        stream.connectObject('notify::volume', syncFromStream, subpage);
+                        stream.connectObject('notify::is-muted', syncFromStream, subpage);
+                    }
                     sliderBg.connectObject('notify::allocation', syncFromStream, subpage);
 
                     sliderBg.connectObject('button-press-event', (a, e) => {
                         if (e.get_button() === 8) return Clutter.EVENT_PROPAGATE;
                         sliderBg._drag = true;
-                        sliderBg._dragFrac = stream.is_muted ? 0 : Math.min(1, stream.volume / maxVol);
+                        sliderBg._dragFrac = getFrac();
                         drag(e);
                         return Clutter.EVENT_STOP;
                     }, subpage);
@@ -2019,9 +2057,13 @@ export const ExpandedPlayer = GObject.registerClass(
                 });
                 _addBtnPressAnim(muteAllBtn);
                 const doMuteAll = () => {
-                    let anyUnmuted = streamsToShow.some(item => !item.stream.is_muted);
+                    let anyUnmuted = streamsToShow.some(item => item.mprisPlayer ? (this._controller._getMprisVolume(item.mprisPlayer) || 0) > 0 : !item.stream.is_muted);
                     for (let item of streamsToShow) {
-                        item.stream.change_is_muted(anyUnmuted);
+                        if (item.mprisPlayer) {
+                            this._controller._setMprisVolume(item.mprisPlayer, anyUnmuted ? 0 : 1);
+                        } else {
+                            item.stream.change_is_muted(anyUnmuted);
+                        }
                     }
                 };
                 muteAllBtn.connectObject('button-press-event', () => Clutter.EVENT_STOP, subpage);

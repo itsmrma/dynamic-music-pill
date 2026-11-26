@@ -1,6 +1,7 @@
 import Soup from "gi://Soup";
 import GLib from "gi://GLib";
 import Gio from "gi://Gio";
+import { romanizeLines } from "./Romanizer.js";
 
 const decode = (data) => new TextDecoder().decode(data);
 const CJK_RE = /[\u3040-\u9FFF\uAC00-\uD7AF]/;
@@ -134,6 +135,13 @@ function ensureWordDurationFloor(lines) {
     if (Array.isArray(line.words) && line.words.length > 0) {
       const lastW = line.words[line.words.length - 1];
       const spanSec = (lastW.time + (lastW.duration || 0.2) * 1000 - line.time) / 1000;
+      if (spanSec > (line.duration || 0)) {
+        line.duration = spanSec;
+      }
+    }
+    if (Array.isArray(line.romanizedWords) && line.romanizedWords.length > 0) {
+      const lastRw = line.romanizedWords[line.romanizedWords.length - 1];
+      const spanSec = (lastRw.time + (lastRw.duration || 0.2) * 1000 - line.time) / 1000;
       if (spanSec > (line.duration || 0)) {
         line.duration = spanSec;
       }
@@ -313,6 +321,53 @@ function parseWordsFromTTML(pBody, _isLineBg = false) {
 function parseTTML(ttmlText) {
   if (!ttmlText || typeof ttmlText !== "string") return { lines: [], hasWordLevel: false };
 
+  // Parse <ttm:agent xml:id="v1"><ttm:name ...>Name</ttm:name></ttm:agent>
+  const agentMap = new Map();
+  const agentRegex = /<ttm:agent\b([^>]*)>(.*?)<\/ttm:agent>/gis;
+  let agentMatch;
+  while ((agentMatch = agentRegex.exec(ttmlText)) !== null) {
+    const attrs = agentMatch[1] || "";
+    const body = agentMatch[2] || "";
+    const idMatch = attrs.match(/xml:id="([^"]+)"/i);
+    if (!idMatch) continue;
+    const nameMatch = body.match(/<ttm:name\b[^>]*>(.*?)<\/ttm:name>/is);
+    if (nameMatch) {
+      const name = unescapeXml(nameMatch[1].replace(/<[^>]+>/g, "")).trim();
+      if (name) agentMap.set(idMatch[1], name);
+    }
+  }
+
+  // Parse <transliterations> ... <text for="L1">...</text> ... </transliterations>
+  const translitMap = new Map();
+  const translitBlockMatch = ttmlText.match(/<transliterations\b[^>]*>(.*?)<\/transliterations>/is);
+  if (translitBlockMatch) {
+    const textRegex = /<text\b([^>]*)>(.*?)<\/text>/gis;
+    let tMatch;
+    while ((tMatch = textRegex.exec(translitBlockMatch[1])) !== null) {
+      const tAttrs = tMatch[1] || "";
+      const tBody = tMatch[2] || "";
+      const forMatch = tAttrs.match(/for="([^"]+)"/i);
+      if (!forMatch) continue;
+      const key = forMatch[1];
+      const romWords = parseWordsFromTTML(tBody, false);
+      let romText = "";
+      if (romWords.length > 0) {
+        for (const w of romWords) {
+          romText += w.text + (w.hasSpace ? " " : "");
+        }
+        romText = romText.trim();
+      } else {
+        romText = unescapeXml(tBody.replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim();
+      }
+      if (romText) {
+        translitMap.set(key, {
+          romanizedText: romText,
+          romanizedWords: romWords.length > 0 ? romWords : null,
+        });
+      }
+    }
+  }
+
   const lines = [];
   let hasWordLevel = false;
 
@@ -324,6 +379,8 @@ function parseTTML(ttmlText) {
     const pBody = pMatch[2];
     const beginMatch = pAttrs.match(/begin="([^"]+)"/i);
     const endMatch = pAttrs.match(/end="([^"]+)"/i);
+    const keyMatch = pAttrs.match(/(?:itunes|lrc):key="([^"]+)"/i);
+    const pAgentMatch = pAttrs.match(/ttm:agent="([^"]+)"/i);
     const isLineBg = /ttm:role="x-bg"/i.test(pAttrs);
 
     const words = parseWordsFromTTML(pBody, isLineBg);
@@ -351,12 +408,30 @@ function parseTTML(ttmlText) {
 
     if (lineText) {
       const lineDuration = lineEnd > lineStart ? (lineEnd - lineStart) / 1000 : 0;
-      if (words.length > 0) {
-        hasWordLevel = true;
-        lines.push({ time: lineStart, text: lineText, words, isWordLevel: true, duration: lineDuration });
-      } else {
-        lines.push({ time: lineStart, text: lineText, isWordLevel: false, duration: lineDuration });
+      const lineObj = words.length > 0
+        ? { time: lineStart, text: lineText, words, isWordLevel: true, duration: lineDuration }
+        : { time: lineStart, text: lineText, isWordLevel: false, duration: lineDuration };
+      if (words.length > 0) hasWordLevel = true;
+
+      if (pAgentMatch) {
+        lineObj.agentId = pAgentMatch[1];
+        const agentName = agentMap.get(pAgentMatch[1]);
+        if (agentName) lineObj.singer = agentName;
       }
+
+      if (keyMatch && translitMap.has(keyMatch[1])) {
+        const tr = translitMap.get(keyMatch[1]);
+        lineObj.romanizedText = tr.romanizedText;
+        if (tr.romanizedWords) lineObj.romanizedWords = tr.romanizedWords;
+      } else {
+        const inlineRomMatch = pBody.match(/<span\s+[^>]*ttm:role="x-roman"[^>]*>(.*?)<\/span>/is);
+        if (inlineRomMatch) {
+          const inlineRom = unescapeXml(inlineRomMatch[1].replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim();
+          if (inlineRom) lineObj.romanizedText = inlineRom;
+        }
+      }
+
+      lines.push(lineObj);
     }
   }
 
@@ -375,6 +450,12 @@ function parseTTML(ttmlText) {
       if (Math.abs(line.time - prev.time) < 150) {
         if (!prev.text.includes(line.text)) {
           prev.text = `${prev.text} / ${line.text}`;
+          if (prev.romanizedText && line.romanizedText && !prev.romanizedText.includes(line.romanizedText)) {
+            prev.romanizedText = `${prev.romanizedText} / ${line.romanizedText}`;
+          }
+          if (line.singer && prev.singer !== line.singer) {
+            prev.singer = prev.singer ? `${prev.singer} & ${line.singer}` : line.singer;
+          }
           const prevEndMs = prev.time + (prev.duration || 0) * 1000;
           const lineEndMs = line.time + (line.duration || 0) * 1000;
           const maxEndMs = Math.max(prevEndMs, lineEndMs);
@@ -389,6 +470,14 @@ function parseTTML(ttmlText) {
           } else {
             delete prev.words;
             prev.isWordLevel = false;
+          }
+          if (prev.romanizedWords && line.romanizedWords && prev.romanizedWords.length > 0 && line.romanizedWords.length > 0) {
+            prev.romanizedWords[prev.romanizedWords.length - 1].hasSpace = true;
+            prev.romanizedWords.push({ time: line.time, duration: 0.1, text: "/", hasSpace: true });
+            prev.romanizedWords = prev.romanizedWords.concat(line.romanizedWords);
+            prev.romanizedWords[prev.romanizedWords.length - 1].hasSpace = false;
+          } else {
+            delete prev.romanizedWords;
           }
         }
         continue;
@@ -1322,9 +1411,16 @@ export class LyricsClient {
     return null;
   }
 
+  _finalizeResult(res) {
+    if (res && Array.isArray(res.lines) && res.lines.length > 0) {
+      romanizeLines(res.lines);
+    }
+    return res;
+  }
+
   async getLyrics(title, artist, album, duration, settings, mprisLyrics = null, trackUrl = null) {
     const localResult = await this._getLocalLyrics(title, artist, trackUrl, settings);
-    if (localResult) return localResult;
+    if (localResult) return this._finalizeResult(localResult);
 
     let mprisText = "";
     if (Array.isArray(mprisLyrics)) {
@@ -1337,21 +1433,21 @@ export class LyricsClient {
     if (mprisText) {
       const mprisSynced = parseLyricsInput(mprisText, false);
       if (mprisSynced.lines && mprisSynced.lines.length > 0) {
-        return {
+        return this._finalizeResult({
           lines: mprisSynced.lines,
           provider: 'MPRIS',
           type: mprisSynced.hasWordLevel ? 'word-level' : 'synced',
           isSynced: true,
-        };
+        });
       }
       const mprisPlain = parseLyricsInput(mprisText, true);
       if (mprisPlain.lines && mprisPlain.lines.length > 0) {
-        mprisPlainFallback = {
+        mprisPlainFallback = this._finalizeResult({
           lines: mprisPlain.lines,
           provider: 'MPRIS',
           type: 'plain',
           isSynced: false,
-        };
+        });
       }
     }
 
@@ -1392,12 +1488,12 @@ export class LyricsClient {
       const lrclibWord = wordLevelItems.find(item => item.provider === 'LRCLib');
       const aiAm = wordLevelItems.find(item => item.provider === 'Apple Music' && item.isAiWordSync);
       const chosen = genuineAm || lrclibWord || aiAm || wordLevelItems[0];
-      return {
+      return this._finalizeResult({
         lines: chosen.lines,
         provider: chosen.provider,
         type: 'word-level',
         isSynced: true,
-      };
+      });
     }
 
     // TIER 2: synced (line-by-line LRC) lyrics
@@ -1406,12 +1502,12 @@ export class LyricsClient {
     if (syncedItems.length > 0) {
       const amItem = syncedItems.find(item => item.provider === 'Apple Music');
       const chosen = amItem || syncedItems[0];
-      return {
+      return this._finalizeResult({
         lines: chosen.lines,
         provider: chosen.provider,
         type: 'synced',
         isSynced: true,
-      };
+      });
     }
 
     // TIER 3: plain text fallback (embedded MPRIS plain text preferred over network plain text)
@@ -1419,12 +1515,12 @@ export class LyricsClient {
 
     for (const item of parsedResults) {
       if (item.type === 'plain') {
-        return {
+        return this._finalizeResult({
           lines: item.lines,
           provider: item.provider,
           type: 'plain',
           isSynced: false,
-        };
+        });
       }
     }
 
